@@ -1,5 +1,6 @@
 import React from "react";
 import { useState } from "react";
+import { useNavigate } from "react-router-dom";
 import rivenImage from "../assets/riven.png";
 import yasuoImage from "../assets/yasuo.png";
 import dravenImage from "../assets/draven.png";
@@ -20,6 +21,7 @@ const Home: React.FC = () => {
   const [champion, setChampion] = useState("");
   const [opponent, setOpponent] = useState("");
   const [role, setRole] = useState("");
+  const navigator = useNavigate();
 
   const handleSubmit = () => {
     if (!champion || !opponent || !role) {
@@ -32,7 +34,8 @@ const Home: React.FC = () => {
       return;
     }
 
-    console.log(champion, opponent, role);
+    navigator('/results', { state: { champion:champion , opponent:opponent , role:role  } })
+
   };
 
   return (
@@ -121,7 +124,7 @@ const Home: React.FC = () => {
             <div className="flex justify-center pt-[1%]">
               <button
                 className="font-vietnam bg-beautiful-pink rounded-xl text-white px-20 py-3 hover:bg-opacity-90 text-lg"
-                onClick={handleSubmit}
+                onMouseDown={handleSubmit}
               >
                 go!
               </button>

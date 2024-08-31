@@ -3,7 +3,6 @@ package search
 import (
 	"encoding/json"
 	"fmt"
-	"log"
 	"net/http"
 	"net/url"
 	"os"
@@ -12,11 +11,11 @@ import (
 	"github.com/joho/godotenv"
 )
 
-func Search(q models.Query) models.SearchResponse {
+func Search(q models.Query) (models.SearchResponse, error) {
 
 	err := godotenv.Load(".env")
 	if err != nil {
-		log.Fatalf(".env file not found: %s", err)
+		return models.SearchResponse{}, fmt.Errorf(".env file not found: %s", err)
 	}
 
 	API_KEY := os.Getenv("CUSTOM_SEARCH_API_KEY")
@@ -29,15 +28,15 @@ func Search(q models.Query) models.SearchResponse {
 
 	resp, err := http.Get(searchURL)
 	if err != nil {
-		log.Fatalf("Failed to make request: %v", err)
+		return models.SearchResponse{}, fmt.Errorf("failed to make request: %v", err)
 	}
 	defer resp.Body.Close()
 
 	var searchResults models.SearchResponse
 	if err := json.NewDecoder(resp.Body).Decode(&searchResults); err != nil {
-		log.Fatalf("Failed to decode response: %v", err)
+		return models.SearchResponse{}, fmt.Errorf("failed to decode response: %v", err)
 	}
 
-	return searchResults
+	return searchResults, nil
 
 }

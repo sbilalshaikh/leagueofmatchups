@@ -88,6 +88,90 @@ func getTopComments(comments []Comment, n int) []Comment {
 	return comments[:n]
 }
 
+func performQualityControl(summary string, championA string, championB string) (string, error) {
+	qualityControlPrompt := fmt.Sprintf(`
+        You are an expert League of Legends analyst. The following summary needs to be checked for relevance and phrasing:
+
+        1. Remove any points that are irrelevant to a matchup between %s (champion) and %s (opponent).
+        2. If a point discusses the inverse matchup (%s vs %s), adjust the phrasing to reflect the correct perspective.
+		3. Do not omit the sources
+        4. Ignore all points that say "INVALID-INPUT".
+        5. Use only the provided summary as the knowledge source; do not introduce any other information.
+        6. Remove any points that do not discuss the direct relationship between %s (champion) and %s (opponent).
+        7. Do not discuss anything about Riot Games' decisions.
+        9. Omit any points that require discussing balance or Riot Games; focus only on the matchup.
+        9. If you cannot revise a summary, write "INVALID-INPUT".
+		10. Omit all meta commentary, ie only give the revised summary without offering any comments about it
+		11. If the summary need not any revisions, output it as is 
+        12. If the subreddit name is of the form "r/%smains", omit the point entirely
+		13. Make sure there is a new line after each point
+		14. Make sure there are no bullet points
+		15. <BOLD> MAKE SURE ONLY THE MATCHUP BETWEEN  %s (champion) and %s (opponent) IS DISCUSSED </BOLD>
+		17. <BOLD> Do not omit the sources </BOLD>
+		18. <BOLD> Do not omit the sources </BOLD>
+		19. <BOLD> Do not omit the sources </BOLD>
+		20. <BOLD> Do not omit the sources </BOLD>
+		21. <BOLD> Omit entries that contain champions that arent %s (champion) and %s (opponent
+
+        Summary:
+        %s
+
+        Respond with ONLY the revised summary, formatted in bullet points as specified before.
+    `, championA, championB, championB, championA, championA, championB, championA, championA, championB, championA, championB, summary)
+
+	cfg, err := config.LoadDefaultConfig(context.TODO(), config.WithRegion("us-east-1"))
+	if err != nil {
+		return "", fmt.Errorf("unable to load SDK config, %v", err)
+	}
+
+	reqbody, err := json.Marshal(map[string]interface{}{
+		"anthropic_version": "bedrock-2023-05-31",
+		"max_tokens":        2200,
+		"system":            qualityControlPrompt,
+		"messages": []map[string]interface{}{
+			{
+				"role": "user",
+				"content": []map[string]string{
+					{
+						"type": "text",
+						"text": summary,
+					},
+				},
+			},
+		},
+		"temperature": 0,
+		"top_p":       0.5,
+	})
+	if err != nil {
+		return "", fmt.Errorf("error creating quality control request body: %v", err)
+	}
+
+	bedrockClient := bedrockruntime.NewFromConfig(cfg)
+	resp, err := bedrockClient.InvokeModel(context.TODO(), &bedrockruntime.InvokeModelInput{
+		ModelId:     aws.String("anthropic.claude-3-5-sonnet-20240620-v1:0"),
+		ContentType: aws.String("application/json"),
+		Accept:      aws.String("application/json"),
+		Body:        reqbody,
+	})
+
+	if err != nil {
+		return "", fmt.Errorf("couldn't perform quality control properly: %s", err)
+	}
+
+	var result map[string]interface{}
+	err = json.Unmarshal(resp.Body, &result)
+	if err != nil {
+		return "", fmt.Errorf("couldn't unmarshal the quality control result: %s", err)
+	}
+
+	qualityControlledCompletion, ok := result["content"].([]interface{})[0].(map[string]interface{})["text"].(string)
+	if !ok {
+		return "", fmt.Errorf("quality-controlled completion not found in the response or not a string")
+	}
+
+	return qualityControlledCompletion, nil
+}
+
 func Summarize(data []byte, championA string, championB string, role string) (string, error) {
 	var post Post
 	err := json.Unmarshal(data, &post)
@@ -109,25 +193,36 @@ func Summarize(data []byte, championA string, championB string, role string) (st
         6. Cite all relevant sources (links) for each point in the summary
         7. keep a formal mood and third person
 
-        Data format:
+
+		The data will be given as follows:
+        <input-data-format>
         [timestamp] [post title] [postlink] [score] [post content]
             [timestamp] [comment link] [score] [comment content]
                 [timestamp] [subcomment link] [score] [subcomment content]
+        <input-data-format/>
 
-        Your response should be formatted as follows:
-        • Summary point 1 [Sources: [link1, link2, ...]]
-        • Summary point 2 [Sources: [link3, link4, ...]]
-        • Summary point 3 [Sources: [link5, link6, ...]]
+
+        Your response should be formatted as follows :
+        • {content} [Sources: [link1, link2, ...]]
+        • {content}  [Sources: [link3, link4, ...]]
+        • {content}  [Sources: [link5, link6, ...]]
         • (Additional points if necessary)
 
+
+
         Important:
-        - Provide at least 4 summary points, but no more than 7
+        - Provide as many summary points as possible, but no more than 6
         - Include multiple sources for each point when available
         - Concatenate "www.reddit.com" to the beginning of each link
         - If the matchup is reversed in the content, adjust your advice accordingly
+		- If the input text contains <txt>loreoflegends<txt/> or <txt>leagueofmemes</txt> output "INVALID-INPUT"
+		- If the text is completely irrelevant to matchup between %s and %s output "INVALID-INPUT"
+		- Ommit "summary points" in the output
+		- <very-important> The only league of legends characters that should be mentioned are <champion>%s</champion> and <opponent>%s</opponent> </very-important>
+		- <very-important> There should be no XML tags or special unicode characters (that have to be specified with /u) in the output </very-important>
 
-        Respond with ONLY THE SUMMARY, formatted as specified above.
-    `, championA, championB, role)
+        Respond with ONLY THE SUMMARY OR "INVALID_INPUT", formatted as specified above.
+    `, championA, championB, role, championA, championB, championA, championB)
 
 	cfg, err := config.LoadDefaultConfig(context.TODO(), config.WithRegion("us-east-1"))
 	if err != nil {
@@ -144,7 +239,7 @@ func Summarize(data []byte, championA string, championB string, role string) (st
 				"content": []map[string]string{
 					{
 						"type": "text",
-						"text": "Analyze the following data:\n\n" + formattedPost,
+						"text": formattedPost,
 					},
 				},
 			},
@@ -158,7 +253,7 @@ func Summarize(data []byte, championA string, championB string, role string) (st
 
 	bedrockClient := bedrockruntime.NewFromConfig(cfg)
 	resp, err := bedrockClient.InvokeModel(context.TODO(), &bedrockruntime.InvokeModelInput{
-		ModelId:     aws.String("anthropic.claude-3-sonnet-20240229-v1:0"),
+		ModelId:     aws.String("anthropic.claude-3-5-sonnet-20240620-v1:0"),
 		ContentType: aws.String("application/json"),
 		Accept:      aws.String("application/json"),
 		Body:        reqbody,
@@ -179,5 +274,10 @@ func Summarize(data []byte, championA string, championB string, role string) (st
 		return "", fmt.Errorf("completion not found in the response or not a string")
 	}
 
-	return completion, nil
+	qualityControlledCompletion, err := performQualityControl(completion, championA, championB)
+	if err != nil {
+		return "", fmt.Errorf("error during quality control: %v", err)
+	}
+
+	return qualityControlledCompletion, nil
 }
