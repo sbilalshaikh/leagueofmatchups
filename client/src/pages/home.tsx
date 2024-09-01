@@ -34,6 +34,8 @@ const Home: React.FC = () => {
       return;
     }
 
+    
+    alert(`${champion} ${opponent}`)
     navigator('/results', { state: { champion:champion , opponent:opponent , role:role  } })
 
   };

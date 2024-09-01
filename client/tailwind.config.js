@@ -53,6 +53,7 @@ module.exports = {
         },
         "rose-gold": "#FCEEEE",
         "beautiful-pink": "#FF9595",
+        "wp" : "#2E5CFF",
       },
       borderRadius: {
         lg: "var(--radius)",

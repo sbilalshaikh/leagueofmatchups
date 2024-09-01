@@ -15,6 +15,7 @@ import (
 	"server/search"
 	"server/summarize"
 
+	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 	"github.com/go-redis/redis/v8"
 	"github.com/joho/godotenv"
@@ -115,7 +116,7 @@ func MatchupHandler(c *gin.Context) {
 			}
 
 			mu.Lock()
-			buffer.WriteString(summary + "\n")
+			buffer.WriteString(summary + "\n\n")
 			mu.Unlock()
 		}(item)
 	}
@@ -148,6 +149,16 @@ func MatchupHandler(c *gin.Context) {
 
 func main() {
 	r := gin.Default()
+
+	config := cors.DefaultConfig()
+	config.AllowOrigins = []string{"https://leagueofmatchups.ai"}
+	config.AllowMethods = []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"}
+	config.AllowHeaders = []string{"Origin", "Content-Type", "Authorization"}
+	config.AllowCredentials = true
+	config.ExposeHeaders = []string{"Content-Length"}
+	config.MaxAge = 12 * time.Hour
+
+	r.Use(cors.New(config))
 
 	routes := r.Group("/api")
 	{

@@ -189,7 +189,7 @@ func Summarize(data []byte, championA string, championB string, role string) (st
         2. Filter out non-productive or irrelevant comments
         3. Give more weight to recent comments
         4. Give more weight to comments with higher score
-        5. Generate a summary with 3-5 bullet points
+        5. Generate a summary with 1-2 bullet points
         6. Cite all relevant sources (links) for each point in the summary
         7. keep a formal mood and third person
 
@@ -211,7 +211,7 @@ func Summarize(data []byte, championA string, championB string, role string) (st
 
 
         Important:
-        - Provide as many summary points as possible, but no more than 6
+        - Provide as many summary points as possible, but no more than 3
         - Include multiple sources for each point when available
         - Concatenate "www.reddit.com" to the beginning of each link
         - If the matchup is reversed in the content, adjust your advice accordingly
