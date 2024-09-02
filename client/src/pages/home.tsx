@@ -1,5 +1,4 @@
-import React from "react";
-import { useState } from "react";
+import React, { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import rivenImage from "../assets/riven.png";
 import yasuoImage from "../assets/yasuo.png";
@@ -7,6 +6,7 @@ import dravenImage from "../assets/draven.png";
 import ezrealImage from "../assets/ezreal.png";
 import champions from "../assets/champions.json";
 import { Selectable, Combobox } from "@/components/ui/combobox";
+import { trackEvent } from "../analytics";
 
 const Home: React.FC = () => {
   const champs: Selectable[] = champions;
@@ -34,8 +34,10 @@ const Home: React.FC = () => {
       return;
     }
 
-    navigator('/results', { state: { champion:champion , opponent:opponent , role:role  } })
+    // Track the form submission event
+    trackEvent("Form", "Submit", `Champion: ${champion}, Opponent: ${opponent}, Role: ${role}`);
 
+    navigator('/results', { state: { champion:champion , opponent:opponent , role:role  } })
   };
 
   return (
@@ -93,7 +95,10 @@ const Home: React.FC = () => {
                 selectionLabel="Champion"
                 width="100%"
                 height="75px"
-                onSelect={setChampion}
+                onSelect={(value) => {
+                  setChampion(value);
+                  trackEvent("Selection", "Champion Selected", value);
+                }}
               />
             </div>
 
@@ -106,7 +111,10 @@ const Home: React.FC = () => {
                 selectionLabel="Champion"
                 width="100%"
                 height="75px"
-                onSelect={setOpponent}
+                onSelect={(value) => {
+                  setOpponent(value);
+                  trackEvent("Selection", "Opponent Selected", value);
+                }}
               />
             </div>
 
@@ -117,7 +125,10 @@ const Home: React.FC = () => {
                 selectionLabel="Role"
                 width="100%"
                 height="75px"
-                onSelect={setRole}
+                onSelect={(value) => {
+                  setRole(value);
+                  trackEvent("Selection", "Role Selected", value);
+                }}
               />
             </div>
 
