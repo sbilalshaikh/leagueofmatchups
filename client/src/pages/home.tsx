@@ -34,8 +34,6 @@ const Home: React.FC = () => {
       return;
     }
 
-    
-    alert(`${champion} ${opponent}`)
     navigator('/results', { state: { champion:champion , opponent:opponent , role:role  } })
 
   };
@@ -76,9 +74,9 @@ const Home: React.FC = () => {
               alt="Ezreal"
             />
           </div>
-          <p className="font-vietnam text-blue-600 underline mb-2 mt-2 font-medium]">
-            how does it work?
-          </p>
+          <a  href="https://github.com/sbilalshaikh/leagueofmatchups/" target="_blank" rel="noopener noreferrer" className="font-vietnam text-blue-600 underline mb-2 mt-2 font-medium]">
+            check out & star ⭐️ the repo!
+          </a>
         </div>
 
         <div

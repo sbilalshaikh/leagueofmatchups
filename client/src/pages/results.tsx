@@ -1,8 +1,8 @@
 import React, { useState, useEffect } from "react";
-import { useLocation } from "react-router-dom";
+import { useLocation  , useNavigate } from "react-router-dom";
 import { Card, CardHeader, CardContent } from "@/components/ui/card";
 
-function parseSources(points: string[]): string[] {
+const parseSources = (points: string[]): string[] => {
   const sourceRegex = /\[Sources: \[(.*?)\]\]/g;
   const sources: string[][] = [];
 
@@ -31,6 +31,11 @@ const Results: React.FC = () => {
   const [data, setData] = useState<{ advice: string } | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const navigate = useNavigate()
+
+  const handleBack = () => {
+    navigate(-1); 
+  };
 
   useEffect(() => {
     const fetchData = async () => {
@@ -104,7 +109,7 @@ const Results: React.FC = () => {
             <ul className="list-disc pl-5 space-y-2">
               {sources.map((source, index) => (
                 <li key={index} className="text-sm">
-                  <a href={source} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">
+                  <a href={source.startsWith('http') ? source : `https://${source}`} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">
                     {source}
                   </a>
                 </li>
@@ -117,7 +122,7 @@ const Results: React.FC = () => {
       <div className="flex justify-center pt-[1%]">
         <button
           className="font-vietnam bg-beautiful-pink rounded-xl text-white px-20 py-3 hover:bg-opacity-90 text-lg"
-        >
+        onClick={handleBack}>
           back
         </button>
       </div>
