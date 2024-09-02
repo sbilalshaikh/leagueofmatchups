@@ -18,6 +18,9 @@ const parseSources = (points: string[]): string[] => {
 }
 
 const cleanPoint = (point: string): string => {
+  if (point == "We aren't confident about the availability of advice on Reddit for this matchup :("){
+    return point
+  }
   const index = point.indexOf('[Sources:');
   if (index !== -1) {
     return point.substring(0, index).trim();
@@ -80,8 +83,20 @@ const Results: React.FC = () => {
   if (error) return <div>Error: {error}</div>;
   if (!data) return <div>No data available</div>;
 
-  const points: string[] = data.advice.split("\n\n").slice(0, -1);
+  let points: string[];
+
+  if (data.advice === "We aren't confident about the availability of advice on Reddit for this matchup :(") {
+    points = ["We aren't confident about the availability of advice on Reddit for this matchup :("];
+  } else if (data.advice.split("INVALID-INPUT").length - 1  > 1){
+    points = ["We aren't confident about the availability of advice on Reddit for this matchup :("];
+
+  } 
+  else {
+    points = data.advice.split("\n\n").slice(0, -1);
+  }
+  
   const sources = parseSources(points);
+
 
   return (
     <div className="min-h-screen text-foreground p-8">
