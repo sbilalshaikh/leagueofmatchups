@@ -3,11 +3,15 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"server/models"
@@ -15,16 +19,11 @@ import (
 	"server/search"
 	"server/summarize"
 
-	"github.com/gin-contrib/cors"
-	"github.com/gin-gonic/gin"
 	"github.com/go-redis/redis/v8"
 	"github.com/joho/godotenv"
 )
 
-var (
-	ctx context.Context
-	rdb *redis.Client
-)
+var rdb *redis.Client
 
 func initRedis() error {
 	redisEndpt := os.Getenv("REDIS_ENDPOINT")
@@ -48,126 +47,173 @@ func initRedis() error {
 }
 
 func init() {
-	ctx = context.Background()
-
 	if err := godotenv.Load(".env"); err != nil {
-		// handle it in matchup hanlder
+		log.Println("Error loading .env file:", err)
 	}
 
 	if err := initRedis(); err != nil {
-		// handle it in matchup handler not here
+		log.Println("Error initializing Redis:", err)
 	}
 }
 
-func MatchupHandler(c *gin.Context) {
+func jsonResponse(w http.ResponseWriter, code int, payload interface{}) {
+	response, _ := json.Marshal(payload)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	w.Write(response)
+}
+
+func MatchupHandler(w http.ResponseWriter, r *http.Request) {
+	// 3 minute timeout context
+	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Minute)
+	defer cancel()
+
 	if rdb == nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Redis client not initialized"})
+		jsonResponse(w, http.StatusInternalServerError, map[string]string{"error": "Redis client not initialized"})
 		return
 	}
 
 	q := models.Query{
-
-		Champion: c.Query("champ"),
-		Opponent: c.Query("opp"),
-		Role:     c.Query("role"),
+		Champion: r.URL.Query().Get("champ"),
+		Opponent: r.URL.Query().Get("opp"),
+		Role:     r.URL.Query().Get("role"),
 	}
 
 	key := q.Champion + "v" + q.Opponent + "@" + q.Role
 	advice, err := rdb.Get(ctx, key).Result()
 	if err == redis.Nil {
+		// continue if key isnt in cache
 	} else if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Redis error: %s", err)})
+		jsonResponse(w, http.StatusInternalServerError, map[string]string{"error": fmt.Sprintf("Redis error: %s", err)})
 		return
 	} else {
-		c.JSON(http.StatusOK, gin.H{"advice": advice})
+		jsonResponse(w, http.StatusOK, map[string]string{"advice": advice})
 		return
 	}
 
 	searchResults, err := search.Search(q)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Search failed: %s", err)})
+		jsonResponse(w, http.StatusInternalServerError, map[string]string{"error": fmt.Sprintf("Search failed: %s", err)})
 		return
 	}
 
-	var wg sync.WaitGroup
-	var mu sync.Mutex
-	var buffer bytes.Buffer
-	errors := make([]string, 0)
+	resultChan := make(chan struct {
+		buffer bytes.Buffer
+		errors []string
+	})
 
-	for _, item := range searchResults.Items {
-		wg.Add(1)
-		go func(item models.SearchItem) {
-			defer wg.Done()
+	go func() {
+		var wg sync.WaitGroup
+		var mu sync.Mutex
+		var buffer bytes.Buffer
+		errors := make([]string, 0)
 
-			scrapedContent, err := scrape.Scrape(item)
-			if err != nil {
-				mu.Lock()
-				errors = append(errors, fmt.Sprintf("Scraping error for %s: %v", item.Link, err))
-				mu.Unlock()
-				return
-			}
+		for _, item := range searchResults.Items {
+			wg.Add(1)
+			go func(item models.SearchItem) {
+				defer wg.Done()
 
-			summary, err := summarize.Summarize(scrapedContent, q.Champion, q.Opponent, q.Role)
-			if err != nil {
-				mu.Lock()
-				errors = append(errors, fmt.Sprintf("Summarization error for %s: %v", item.Link, err))
-				mu.Unlock()
-				return
-			}
+				select {
+				case <-ctx.Done():
+					return // exit if context is finished
+				default:
+					scrapedContent, err := scrape.Scrape(item)
+					if err != nil {
+						mu.Lock()
+						errors = append(errors, fmt.Sprintf("Scraping error for %s: %v", item.Link, err))
+						mu.Unlock()
+						return
+					}
 
-			mu.Lock()
-			buffer.WriteString(summary + "\n\n")
-			mu.Unlock()
-		}(item)
-	}
-	wg.Wait()
+					summary, err := summarize.Summarize(scrapedContent, q.Champion, q.Opponent, q.Role)
+					if err != nil {
+						mu.Lock()
+						errors = append(errors, fmt.Sprintf("Summarization error for %s: %v", item.Link, err))
+						mu.Unlock()
+						return
+					}
 
-	if len(errors) > 0 {
-		c.JSON(http.StatusPartialContent, gin.H{
-			"advice": buffer.String(),
-			"errors": errors,
-		})
-		return
-	}
+					mu.Lock()
+					buffer.WriteString(summary + "\n\n")
+					mu.Unlock()
+				}
+			}(item)
+		}
 
-	str := buffer.String()
-	if strings.Contains(str, "INVALID-INPUT") {
-		if err := rdb.Set(ctx, key, str, 2592000*time.Second).Err(); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to set Redis key: %v", err)})
+		wg.Wait()
+		resultChan <- struct {
+			buffer bytes.Buffer
+			errors []string
+		}{buffer, errors}
+	}()
+
+	select {
+	case result := <-resultChan:
+		// process completed
+		if len(result.errors) > 0 {
+			jsonResponse(w, http.StatusPartialContent, map[string]interface{}{
+				"advice": result.buffer.String(),
+				"errors": result.errors,
+			})
 			return
 		}
-		c.JSON(http.StatusOK, gin.H{"advice": "We aren't confident about the availability of advice on Reddit for this matchup :("})
-		return
-	}
 
-	if err := rdb.Set(ctx, key, str, 2592000*time.Second).Err(); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to set Redis key: %v", err)})
+		str := result.buffer.String()
+		if strings.Contains(str, "INVALID-INPUT") {
+			if err := rdb.Set(ctx, key, str, 2592000*time.Second).Err(); err != nil {
+				jsonResponse(w, http.StatusInternalServerError, map[string]string{"error": fmt.Sprintf("Failed to set Redis key: %v", err)})
+				return
+			}
+			jsonResponse(w, http.StatusOK, map[string]string{"advice": "We aren't confident about the availability of advice on Reddit for this matchup :("})
+			return
+		}
+
+		if err := rdb.Set(ctx, key, str, 2592000*time.Second).Err(); err != nil {
+			jsonResponse(w, http.StatusInternalServerError, map[string]string{"error": fmt.Sprintf("Failed to set Redis key: %v", err)})
+			return
+		}
+		jsonResponse(w, http.StatusOK, map[string]string{"advice": str})
+
+	case <-ctx.Done():
+		// timeout occured
+		jsonResponse(w, http.StatusRequestTimeout, map[string]string{"error": "Processing took too long and was terminated"})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"advice": buffer.String()})
 }
 
 func main() {
-	r := gin.Default()
+	http.HandleFunc("/api/matchup", MatchupHandler)
 
-	config := cors.DefaultConfig()
-	config.AllowOrigins = []string{"https://leagueofmatchups.ai"}
-	config.AllowMethods = []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"}
-	config.AllowHeaders = []string{"Origin", "Content-Type", "Authorization"}
-	config.AllowCredentials = true
-	config.ExposeHeaders = []string{"Content-Length"}
-	config.MaxAge = 12 * time.Hour
+	srv := &http.Server{
+		Addr: ":8080",
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// CORS headers
+			w.Header().Set("Access-Control-Allow-Origin", "https://leagueofmatchups.ai")
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Origin, Content-Type, Authorization")
+			w.Header().Set("Access-Control-Allow-Credentials", "true")
+			w.Header().Set("Access-Control-Max-Age", "86400") // 24 hours
 
-	r.Use(cors.New(config))
+			if r.Method == "OPTIONS" {
+				w.WriteHeader(http.StatusOK)
+				return
+			}
 
-	routes := r.Group("/api")
-	{
-		routes.GET("/matchup", MatchupHandler)
+			http.DefaultServeMux.ServeHTTP(w, r)
+		}),
 	}
 
-	if err := r.Run(":8080"); err != nil {
-		// print to stderr if we cant start
-		fmt.Fprintf(os.Stderr, "Failed to start server: %v\n", err)
-		os.Exit(1)
-	}
+	// init  server in a goroutine so that
+	// it won't block the graceful shutdown handling below
+	go func() {
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("Failed to start server: %v\n", err)
+		}
+	}()
+
+	// wait for singal to shutdown server
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	<-quit
+	log.Println("Shutting down server...")
 }
