@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -10,7 +9,6 @@ import (
 	"os"
 	"os/signal"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
@@ -79,17 +77,25 @@ func MatchupHandler(w http.ResponseWriter, r *http.Request) {
 		Role:     r.URL.Query().Get("role"),
 	}
 
-	key := q.Champion + "v" + q.Opponent + "@" + q.Role
-	advice, err := rdb.Get(ctx, key).Result()
-	if err == redis.Nil {
-		// continue if key isnt in cache
-	} else if err != nil {
-		jsonResponse(w, http.StatusInternalServerError, map[string]string{"error": fmt.Sprintf("Redis error: %s", err)})
-		return
-	} else {
-		jsonResponse(w, http.StatusOK, map[string]string{"advice": advice})
+	// Validate input
+	if q.Champion == "" || q.Opponent == "" || q.Role == "" {
+		jsonResponse(w, http.StatusBadRequest, map[string]string{"error": "Missing required parameters"})
 		return
 	}
+
+	key := q.Champion + "v" + q.Opponent + "@" + q.Role
+	advice, err := rdb.Get(ctx, key).Result()
+	if err == nil {
+		// If key exists in cache, return it immediately
+		jsonResponse(w, http.StatusOK, map[string]string{"advice": advice})
+		return
+	} else if err != redis.Nil {
+		// If there's an error other than key not existing, return error
+		jsonResponse(w, http.StatusInternalServerError, map[string]string{"error": fmt.Sprintf("Redis error: %s", err)})
+		return
+	}
+
+	// If we're here, the key wasn't in the cache, so we need to generate advice
 
 	searchResults, err := search.Search(q)
 	if err != nil {
@@ -97,88 +103,72 @@ func MatchupHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resultChan := make(chan struct {
-		buffer bytes.Buffer
-		errors []string
-	})
-
-	go func() {
-		var wg sync.WaitGroup
-		var mu sync.Mutex
-		var buffer bytes.Buffer
-		errors := make([]string, 0)
-
-		for _, item := range searchResults.Items {
-			wg.Add(1)
-			go func(item models.SearchItem) {
-				defer wg.Done()
-
-				select {
-				case <-ctx.Done():
-					return // exit if context is finished
-				default:
-					scrapedContent, err := scrape.Scrape(item)
-					if err != nil {
-						mu.Lock()
-						errors = append(errors, fmt.Sprintf("Scraping error for %s: %v", item.Link, err))
-						mu.Unlock()
-						return
-					}
-
-					summary, err := summarize.Summarize(scrapedContent, q.Champion, q.Opponent, q.Role)
-					if err != nil {
-						mu.Lock()
-						errors = append(errors, fmt.Sprintf("Summarization error for %s: %v", item.Link, err))
-						mu.Unlock()
-						return
-					}
-
-					mu.Lock()
-					buffer.WriteString(summary + "\n\n")
-					mu.Unlock()
-				}
-			}(item)
+	if len(searchResults.Items) == 0 {
+		advice := "We aren't confident about the availability of advice on Reddit for this matchup :("
+		if err := rdb.Set(ctx, key, advice, 2592000*time.Second).Err(); err != nil {
+			log.Printf("Failed to set Redis key: %v", err)
 		}
-
-		wg.Wait()
-		resultChan <- struct {
-			buffer bytes.Buffer
-			errors []string
-		}{buffer, errors}
-	}()
-
-	select {
-	case result := <-resultChan:
-		// process completed
-		if len(result.errors) > 0 {
-			jsonResponse(w, http.StatusPartialContent, map[string]interface{}{
-				"advice": result.buffer.String(),
-				"errors": result.errors,
-			})
-			return
-		}
-
-		str := result.buffer.String()
-		if strings.Contains(str, "INVALID-INPUT") {
-			if err := rdb.Set(ctx, key, str, 2592000*time.Second).Err(); err != nil {
-				jsonResponse(w, http.StatusInternalServerError, map[string]string{"error": fmt.Sprintf("Failed to set Redis key: %v", err)})
-				return
-			}
-			jsonResponse(w, http.StatusOK, map[string]string{"advice": "We aren't confident about the availability of advice on Reddit for this matchup :("})
-			return
-		}
-
-		if err := rdb.Set(ctx, key, str, 2592000*time.Second).Err(); err != nil {
-			jsonResponse(w, http.StatusInternalServerError, map[string]string{"error": fmt.Sprintf("Failed to set Redis key: %v", err)})
-			return
-		}
-		jsonResponse(w, http.StatusOK, map[string]string{"advice": str})
-
-	case <-ctx.Done():
-		// timeout occured
-		jsonResponse(w, http.StatusRequestTimeout, map[string]string{"error": "Processing took too long and was terminated"})
+		jsonResponse(w, http.StatusOK, map[string]string{"advice": advice})
 		return
 	}
+
+	resultChan := make(chan string)
+	errorChan := make(chan error)
+
+	for _, item := range searchResults.Items {
+		go func(item models.SearchItem) {
+			scrapedContent, err := scrape.Scrape(item)
+			if err != nil {
+				errorChan <- fmt.Errorf("scraping error for %s: %v", item.Link, err)
+				return
+			}
+
+			summary, err := summarize.Summarize(scrapedContent, q.Champion, q.Opponent, q.Role)
+			if err != nil {
+				errorChan <- fmt.Errorf("summarization error for %s: %v", item.Link, err)
+				return
+			}
+
+			if strings.Contains(summary, "INVALID_INPUT") {
+				errorChan <- fmt.Errorf("invalid input for %s", item.Link)
+				return
+			}
+
+			resultChan <- summary
+		}(item)
+	}
+
+	var finalAdvice strings.Builder
+	errorCount := 0
+
+	for i := 0; i < len(searchResults.Items); i++ {
+		select {
+		case summary := <-resultChan:
+			finalAdvice.WriteString(summary)
+			finalAdvice.WriteString("\n\n")
+		case err := <-errorChan:
+			log.Printf("Error: %v", err)
+			errorCount++
+		case <-ctx.Done():
+			jsonResponse(w, http.StatusRequestTimeout, map[string]string{"error": "Processing took too long and was terminated"})
+			return
+		}
+	}
+
+	if finalAdvice.Len() == 0 || errorCount == len(searchResults.Items) {
+		advice := "We aren't confident about the availability of advice on Reddit for this matchup :("
+		if err := rdb.Set(ctx, key, advice, 2592000*time.Second).Err(); err != nil {
+			log.Printf("Failed to set Redis key: %v", err)
+		}
+		jsonResponse(w, http.StatusOK, map[string]string{"advice": advice})
+		return
+	}
+
+	advice = finalAdvice.String()
+	if err := rdb.Set(ctx, key, advice, 2592000*time.Second).Err(); err != nil {
+		log.Printf("Failed to set Redis key: %v", err)
+	}
+	jsonResponse(w, http.StatusOK, map[string]string{"advice": advice})
 }
 
 func main() {
